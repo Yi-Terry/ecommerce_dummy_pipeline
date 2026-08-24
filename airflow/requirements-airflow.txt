@@ -1,0 +1,5 @@
+faker
+python-dotenv
+kafka-python
+requests
+databricks-sql-connector

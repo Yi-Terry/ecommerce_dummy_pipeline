@@ -9,8 +9,10 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from dotenv import load_dotenv
 from faker import Faker
 
+load_dotenv()
 fake = Faker()
 
 CATEGORIES = ["electronics", "apparel", "home", "beauty", "sports", "toys", "books"]
@@ -30,7 +32,7 @@ def build_catalog(n_products: int=200):
         })
     return catalog
 
-def build_user(n_users: int=200):
+def build_user(n_users: int=2000):
     return  [f"U{i:06d}" for i in range(n_users)]
 
 def now_iso() -> str:
@@ -39,8 +41,8 @@ def now_iso() -> str:
 TRANSITIONS = {
     "start": [("browse", 1.0)],
     "browse": [("view_product", 0.75), ("exit", 0.25)],
-    "view_product": [("view_product", 0.30),("add_to_cart", 0.30) ("exit", 0.40)],
-    "add_to_cart": [("view_product", 0.25),("checkout", 0.35) ("exit", 0.40)],
+    "view_product": [("view_product", 0.30), ("add_to_cart", 0.30), ("exit", 0.40)],
+    "add_to_cart": [("view_product", 0.25), ("checkout", 0.35), ("exit", 0.40)],
     "checkout": [("purchase", 0.75), ("exit", 0.25)],
     "purchase": [("exit", 1.0)]
 }
@@ -48,7 +50,7 @@ TRANSITIONS = {
 def next_state(state: str) -> str:
     options, weights = zip(*TRANSITIONS[state])
 
-    return random.choice(options, weights=weights, k=1)[0]
+    return random.choices(options, weights=weights, k=1)[0]
 
 class Sink:
     async def send(self, event: dict):
@@ -169,11 +171,11 @@ async def run_session(session: Session, catalog: list, sink: Sink,
         }
 
         if state == "browse":
-            event["page_type"] = "page_view"
+            event["event_type"] = "page_view"
             event["page"] = random.choice(["home"]+[f"category:{c}" for c in CATEGORIES])
 
         elif state == "view_product": 
-            product = random(catalog)
+            product = random.choice(catalog)
             last_product = product
             event["event_type"] = "product_view"
             event["product_id"] = product["product_id"]
@@ -184,22 +186,24 @@ async def run_session(session: Session, catalog: list, sink: Sink,
         elif state == "add_to_cart":
             product =last_product or random.choice(catalog)
             qty = random.randint(1,3)
-            session.cart.apped({**product, "qty": qty})
+            session.cart.append({**product, "qty": qty})
             event["event_type"] = "add_to_cart"
             event["product_id"] = product["product_id"]
             event["price"] = product["price"]  
             event["quantity"] = qty
-        
+
         elif state == "checkout":
-            total = round(sum(i["price"] * i["qty"] for i in session.cart),2)
+            event["event_type"] = "begin_checkout"
+            event["cart_size"] = sum(i["qty"] for i in session.cart)
+            event["cart_value"] = round(sum(i["price"] * i["qty"] for i in session.cart), 2)
+
+        
+        elif state == "purchase":
+            total = round(sum(i["price"] * i["qty"] for i in session.cart), 2)
             event["event_type"] = "purchase"
             event["order_id"] = str(uuid.uuid4())
             event["items"] = [
-                {
-                    "product_id": i["product_id"],
-                    "quantity": i["qty"],
-                    "price": i["price"]
-                }
+                {"product_id": i["product_id"], "quantity": i["qty"], "price": i["price"]}
                 for i in session.cart
             ]
             event["order_value"] = total
@@ -224,5 +228,56 @@ async def session_spawner(catalog, users, sink, sessions_per_min: float,
         await asyncio.sleep(interval)
     if tasks:
         await asyncio.gather(*tasks)
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Simulate ecommerce user-session events.")
+    p.add_argument("--sink", choices=["console", "file", "kafka", "webhook"], default="console")
+    p.add_argument("--output", help="Output file path (for --sink file)")
+    p.add_argument("--kafka-bootstrap", default="localhost:9092",
+                    help="e.g. localhost:9092 or pkc-xxxxx.confluent.cloud:9092")
+    p.add_argument("--kafka-topic", default="ecommerce_events")
+    p.add_argument("--kafka-security-protocol", default="PLAINTEXT",
+                    choices=["PLAINTEXT", "SASL_SSL", "SASL_PLAINTEXT"],
+                    help="Use SASL_SSL for managed Kafka (e.g. Confluent Cloud)")
+    p.add_argument("--kafka-sasl-mechanism", default="PLAIN")
+    p.add_argument("--kafka-sasl-username",
+                    help="API key (or set KAFKA_SASL_USERNAME env var)")
+    p.add_argument("--kafka-sasl-password",
+                    help="API secret (or set KAFKA_SASL_PASSWORD env var — preferred)")
+    p.add_argument("--webhook-url", help="URL to POST events to (for --sink webhook)")
+    p.add_argument("--sessions-per-min", type=float, default=30.0,
+                    help="Rate of new sessions starting")
+    p.add_argument("--duration", type=float, default=60.0,
+                    help="How long to run, in seconds (0 = run forever)")
+    p.add_argument("--min-think", type=float, default=0.5, help="Min seconds between actions")
+    p.add_argument("--max-think", type=float, default=3.0, help="Max seconds between actions")
+    p.add_argument("--n-products", type=int, default=200)
+    p.add_argument("--n-users", type=int, default=2000)
+    p.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility")
+    return p.parse_args()
+
                 
-                
+async def main():
+    args = parse_args()
+    if args.seed is not None:
+        random.seed(args.seed)
+        Faker.seed(args.seed)
+    catalog = build_catalog(args.n_products)
+    users = build_user(args.n_users)
+    sink = make_sink(args)
+
+    try:
+        await session_spawner(
+            catalog, users, sink,
+            sessions_per_min=args.sessions_per_min,
+            duration=args.duration,
+            min_think=args.min_think,
+            max_think=args.max_think
+        )
+    finally:
+        await sink.close()
+
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

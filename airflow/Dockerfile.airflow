@@ -1,0 +1,7 @@
+# Extends the official Airflow image with the packages the generator needs
+# (faker, kafka-python, databricks-sql-connector, etc.) so BashOperator tasks
+# that run generator.py have everything installed already.
+FROM apache/airflow:2.10.3-python3.11
+
+COPY requirements-airflow.txt /requirements-airflow.txt
+RUN pip install --no-cache-dir -r /requirements-airflow.txt

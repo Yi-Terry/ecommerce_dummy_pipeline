@@ -1,0 +1,8 @@
+faker>=20.0.0
+
+# Only needed for --sink kafka
+kafka-python>=2.0.2
+
+# Only needed for --sink webhook
+requests>=2.32.0
+python-dotenv
