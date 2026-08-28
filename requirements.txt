@@ -6,3 +6,5 @@ kafka-python>=2.0.2
 # Only needed for --sink webhook
 requests>=2.32.0
 python-dotenv
+databricks-sql-connector
+apache-airflow-providers-databricks
