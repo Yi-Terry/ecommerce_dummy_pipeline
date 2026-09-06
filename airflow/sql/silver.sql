@@ -1,3 +1,8 @@
+-- Creates (if needed) and incrementally merges parsed ecommerce events from
+-- workspace.bronze.ecommerce_events (raw JSON payloads) into the structured
+-- workspace.silver.ecommerce_events table, deduplicated by event_id.
+-- Run by the merge_to_silver task in ecommerce_generator_Dag.py.
+
 create table if not exists workspace.silver.ecommerce_events (
     event_id string,
     event_type string,

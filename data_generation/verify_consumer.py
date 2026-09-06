@@ -1,6 +1,16 @@
+"""Kafka consumer for manually verifying events produced by generator.py.
+
+Reads from --topic (default: ecommerce_events) starting at the earliest
+offset, prints each event as it arrives, and reports summary stats (event
+type counts and purchase conversion rate) when stopped.
+
+Usage:
+    python verify_consumer.py --bootstrap localhost:9092 --topic ecommerce_events
+"""
+
 import argparse
-import json 
-import os 
+import json
+import os
 from collections import Counter, defaultdict
 
 from kafka import KafkaConsumer

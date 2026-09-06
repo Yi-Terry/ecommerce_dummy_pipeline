@@ -1,3 +1,7 @@
+# Single-broker Kafka (KRaft mode, no ZooKeeper) for local development.
+# Used as the target for `generator.py --sink kafka` and by verify_consumer.py.
+# Start with: docker compose -f docker-compose.kafka.yml up -d
+
 services:
   kafka:
     image: apache/kafka:3.8.0

@@ -1,3 +1,9 @@
+# Local Airflow stack (Postgres metadata DB + API server, scheduler,
+# dag-processor, triggerer) for running the ecommerce_generator_to_bronze DAG.
+# Image is built from Dockerfile.airflow, which layers the generator's
+# Python dependencies onto the official Airflow image.
+# Start with: docker compose -f airflow/docker-compose.airflow.yml up -d --build
+
 x-airflow-common: &airflow-common
   build:
     context: .
