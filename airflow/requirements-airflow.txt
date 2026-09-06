@@ -4,3 +4,4 @@ kafka-python
 requests
 databricks-sql-connector
 apache-airflow-providers-databricks
+apache-airflow-providers-fab
