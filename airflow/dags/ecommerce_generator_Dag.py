@@ -1,6 +1,7 @@
 from datetime import datetime,timedelta
 from airflow import DAG
-from airlfow.operators.bash import BashOperator
+from airflow.operators.bash import BashOperator
+from airflow.providers.databricks.operators.databricks_sql import DatabricksSqlOperator
 
 GENERATOR_SCRIPT_PATH = "/opt/airflow/data_generation/generator.py"
 GENERATOR_BURST_SECONDS = 90
@@ -18,7 +19,8 @@ with DAG(
     schedule=timedelta(minutes=5),
     start_date=datetime(2026,1,1),
     catchup=False,
-    tags =["ecommerce","databricks"]
+    tags =["ecommerce","databricks"],
+    template_searchpath="/opt/airflow/sql"
 ) as dag:
 
     run_generator = BashOperator(
@@ -32,3 +34,11 @@ with DAG(
             f"--duration {GENERATOR_BURST_SECONDS}"
         )
     )
+
+    merge_to_silver = DatabricksSqlOperator(
+        task_id="merge_to_silver",
+        databricks_conn_id="databricks_id",
+        sql="silver.sql"
+    )
+
+    run_generator >> merge_to_silver

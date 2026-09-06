@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import json
+import logging
 import random
 import sys
 import os
@@ -14,6 +15,7 @@ from faker import Faker
 
 load_dotenv()
 fake = Faker()
+logger = logging.getLogger("generator")
 
 CATEGORIES = ["electronics", "apparel", "home", "beauty", "sports", "toys", "books"]
 DEVICES = ["mobile", "desktop", "tablet"]
@@ -111,19 +113,75 @@ class WebhookSink(Sink):
     async def send(self, event: dict):
         self.session.post(self.url, json=event, timeout=5)
 
+class DatabricksSink(Sink):
+    """
+    Writes events directly into a Databricks Delta table via SQL INSERT,
+    using a Databricks SQL Warehouse. Buffers events and flushes in batches
+    to avoid one network round trip per event.
+    """
+ 
+    def __init__(self, server_hostname: str, http_path: str, access_token: str,
+                 catalog: str, schema: str, table: str, batch_size: int = 50):
+        from databricks import sql  # lazy import, requires databricks-sql-connector
+ 
+        self.connection = sql.connect(
+            server_hostname=server_hostname,
+            http_path=http_path,
+            access_token=access_token,
+        )
+        self.table = f"{catalog}.{schema}.{table}"
+        self.batch_size = batch_size
+        self.buffer = []
+ 
+    async def send(self, event: dict):
+        self.buffer.append(event)
+        if len(self.buffer) >= self.batch_size:
+            self._flush()
+ 
+    def _flush(self):
+        if not self.buffer:
+            return
+ 
+        rows = self.buffer
+        self.buffer = []
+ 
+        values_clause = ", ".join(["(?, ?, ?)"] * len(rows))
+        params = []
+        for event in rows:
+            params.extend([
+                event.get("event_id"),
+                json.dumps(event),
+                event.get("timestamp"),
+            ])
+ 
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                f"INSERT INTO {self.table} (event_id, raw_json, event_timestamp) "
+                f"VALUES {values_clause}",
+                params,
+            )
+ 
+    async def close(self):
+        self._flush()  # send whatever's left in the buffer
+        self.connection.close()
+
 
 def make_sink(args) -> Sink:
     if args.sink == "console":
+        logger.info("Sink: console")
         return ConsoleSink()
 
     if args.sink == "file":
         if not args.output:
             sys.exit(" --ouput required for --sink file.")
+        logger.info("Sink: file (path=%s)", args.output)
         return FileSink(args.output)
 
     if args.sink == "kafka":
         if not args.kafka_topic:
             sys.exit("--kafka-topic required for --sink kafka.")
+        logger.info("Sink: kafka (bootstrap=%s, topic=%s, security_protocol=%s)",
+                     args.kafka_bootstrap, args.kafka_topic, args.kafka_security_protocol)
         return KafkaSink(
             args.kafka_bootstrap,
             args.kafka_topic,
@@ -138,7 +196,32 @@ def make_sink(args) -> Sink:
         if not args.webhook_url:
             sys.exit("--webhook_url is required for --sink webhook.")
 
+        logger.info("Sink: webhook (url=%s)", args.webhook_url)
         return WebhookSink(args.webhook_url)
+
+    if args.sink == "databricks":
+        server_hostname = args.databricks_server_hostname or os.environ.get("DATABRICKS_SERVER_HOSTNAME")
+        if not server_hostname:
+            sys.exit("--databricks-server-hostname (or DATABRICKS_SERVER_HOSTNAME env var) is required for --sink databricks")
+        http_path = args.databricks_http_path or os.environ.get("DATABRICKS_HTTP_PATH")
+        if not http_path:
+            sys.exit("--databricks-http-path (or DATABRICKS_HTTP_PATH env var) is required for --sink databricks")
+        token = args.databricks_token or os.environ.get("DATABRICKS_TOKEN")
+        if not token:
+            sys.exit("--databricks-token (or DATABRICKS_TOKEN env var) is required for --sink databricks")
+        logger.info("Sink: databricks (host=%s, table=%s.%s.%s, batch_size=%d)",
+                     server_hostname, args.databricks_catalog, args.databricks_schema,
+                     args.databricks_table, args.databricks_batch_size)
+        return DatabricksSink(
+            server_hostname=server_hostname,
+            http_path=http_path,
+            access_token=token,
+            catalog=args.databricks_catalog,
+            schema=args.databricks_schema,
+            table=args.databricks_table,
+            batch_size=args.databricks_batch_size,
+        )
+
     raise ValueError(args.sink)
 
 @dataclass
@@ -149,8 +232,14 @@ class Session:
     referrer: str
     cart: list = field(default_factory=list)
 
-async def run_session(session: Session, catalog: list, sink: Sink, 
-                          min_think: float, max_think: float):
+@dataclass
+class Stats:
+    sessions_started: int = 0
+    events_sent: int = 0
+    purchases: int = 0
+
+async def run_session(session: Session, catalog: list, sink: Sink,
+                          min_think: float, max_think: float, stats: Stats):
     state = "start"
     last_product = None
 
@@ -207,14 +296,20 @@ async def run_session(session: Session, catalog: list, sink: Sink,
                 for i in session.cart
             ]
             event["order_value"] = total
-            
+            stats.purchases += 1
+            logger.info("Purchase: session=%s order=%s value=%.2f",
+                        session.session_id[:8], event["order_id"][:8], total)
+
         await sink.send(event)
+        stats.events_sent += 1
+        logger.debug("Event sent: session=%s type=%s", session.session_id[:8], state)
+
 async def session_spawner(catalog, users, sink, sessions_per_min: float,
-                        duration: float, min_think: float, max_think: float):
+                        duration: float, min_think: float, max_think: float, stats: Stats):
     interval = 60/sessions_per_min
     tasks = []
     end_time = time.monotonic() + duration if duration else None
-    
+
     while end_time is None or time.monotonic() < end_time:
         session = Session(
             session_id=str(uuid.uuid4()),
@@ -222,8 +317,11 @@ async def session_spawner(catalog, users, sink, sessions_per_min: float,
             device=random.choice(DEVICES),
             referrer=random.choice(REFERRERS)
         )
+        stats.sessions_started += 1
+        logger.info("Session started (#%d): user=%s device=%s referrer=%s",
+                    stats.sessions_started, session.user_id, session.device, session.referrer)
         tasks.append(asyncio.create_task(
-            run_session(session,catalog,sink, min_think, max_think)
+            run_session(session, catalog, sink, min_think, max_think, stats)
         ))
         await asyncio.sleep(interval)
     if tasks:
@@ -231,7 +329,7 @@ async def session_spawner(catalog, users, sink, sessions_per_min: float,
 
 def parse_args():
     p = argparse.ArgumentParser(description="Simulate ecommerce user-session events.")
-    p.add_argument("--sink", choices=["console", "file", "kafka", "webhook"], default="console")
+    p.add_argument("--sink", choices=["console", "file", "kafka", "webhook", "databricks"], default="console")
     p.add_argument("--output", help="Output file path (for --sink file)")
     p.add_argument("--kafka-bootstrap", default="localhost:9092",
                     help="e.g. localhost:9092 or pkc-xxxxx.confluent.cloud:9092")
@@ -245,6 +343,16 @@ def parse_args():
     p.add_argument("--kafka-sasl-password",
                     help="API secret (or set KAFKA_SASL_PASSWORD env var — preferred)")
     p.add_argument("--webhook-url", help="URL to POST events to (for --sink webhook)")
+    p.add_argument("--databricks-server-hostname",
+                    help="Databricks SQL Warehouse hostname (or DATABRICKS_SERVER_HOSTNAME env var)")
+    p.add_argument("--databricks-http-path",
+                    help="Databricks SQL Warehouse HTTP path (or DATABRICKS_HTTP_PATH env var)")
+    p.add_argument("--databricks-token",
+                    help="Databricks access token (or DATABRICKS_TOKEN env var — preferred)")
+    p.add_argument("--databricks-catalog", default="workspace")
+    p.add_argument("--databricks-schema", default="bronze")
+    p.add_argument("--databricks-table", default="ecommerce_events")
+    p.add_argument("--databricks-batch-size", type=int, default=50)
     p.add_argument("--sessions-per-min", type=float, default=30.0,
                     help="Rate of new sessions starting")
     p.add_argument("--duration", type=float, default=60.0,
@@ -254,28 +362,47 @@ def parse_args():
     p.add_argument("--n-products", type=int, default=200)
     p.add_argument("--n-users", type=int, default=2000)
     p.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility")
+    p.add_argument("--log-level", default="INFO",
+                    choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+                    help="Logging verbosity (DEBUG logs every event sent)")
     return p.parse_args()
 
                 
 async def main():
     args = parse_args()
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format="%(asctime)s %(levelname)-8s %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
     if args.seed is not None:
         random.seed(args.seed)
         Faker.seed(args.seed)
+
+    logger.info("Generating catalog (%d products) and users (%d)", args.n_products, args.n_users)
     catalog = build_catalog(args.n_products)
     users = build_user(args.n_users)
     sink = make_sink(args)
+    stats = Stats()
 
+    logger.info("Starting run: sessions_per_min=%s duration=%ss",
+                args.sessions_per_min, args.duration if args.duration else "infinite")
+    start = time.monotonic()
     try:
         await session_spawner(
             catalog, users, sink,
             sessions_per_min=args.sessions_per_min,
             duration=args.duration,
             min_think=args.min_think,
-            max_think=args.max_think
+            max_think=args.max_think,
+            stats=stats,
         )
     finally:
         await sink.close()
+        elapsed = time.monotonic() - start
+        logger.info("Run complete in %.1fs: sessions=%d events=%d purchases=%d",
+                    elapsed, stats.sessions_started, stats.events_sent, stats.purchases)
 
 
 

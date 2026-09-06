@@ -1,1 +1,4 @@
 .env
+airflow/logs
+airflow/dags/__pycache__
+data_generation/__pycache__
