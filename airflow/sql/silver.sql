@@ -1,22 +1,27 @@
-create table if not exists workspace.silver.ecommerce_events as
-    event_id varchar,
-    event_type varchar,
-    session_id varchar,
-    user_id varchar,
-    device varchar,
-    referrer varchar,
-    page varchar,
-    product_id varchar,
-    product_name varchar,
-    category varchar,
+-- Creates (if needed) and incrementally merges parsed ecommerce events from
+-- workspace.bronze.ecommerce_events (raw JSON payloads) into the structured
+-- workspace.silver.ecommerce_events table, deduplicated by event_id.
+-- Run by the merge_to_silver task in ecommerce_generator_Dag.py.
+
+create table if not exists workspace.silver.ecommerce_events (
+    event_id string,
+    event_type string,
+    session_id string,
+    user_id string,
+    device string,
+    referrer string,
+    page string,
+    product_id string,
+    product_name string,
+    category string,
     price float,
     quantity integer,
     cart_size integer,
     cart_value float,
-    order_id varchar,
+    order_id string,
     order_value float,
     event_timestamp timestamp_ntz
-FROM workspace.bronze.ecommerce_events;
+);
 
 MERGE INTO workspace.silver.ecommerce_events AS target
 USING (

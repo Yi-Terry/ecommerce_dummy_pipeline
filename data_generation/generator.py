@@ -1,3 +1,16 @@
+"""Ecommerce clickstream event generator.
+
+Simulates concurrent user browsing sessions (browse -> view_product ->
+add_to_cart -> checkout -> purchase) via a weighted state machine, and emits
+the resulting events to a configurable sink: console, file, Kafka, webhook,
+or Databricks (bronze table).
+
+Usage:
+    python generator.py --sink console --sessions-per-min 30 --duration 60
+
+Run `python generator.py --help` for the full list of options.
+"""
+
 import argparse
 import asyncio
 import json

@@ -1,3 +1,13 @@
+"""Airflow DAG: ecommerce_generator_to_bronze
+
+Every 5 minutes, runs generator.py for a short burst to write simulated
+ecommerce events directly into the Databricks `bronze.ecommerce_events`
+table, then merges new rows into `silver.ecommerce_events` (see sql/silver.sql).
+
+Requires the Airflow variables `databricks_server_hostname` and
+`databricks_http_path`, and the connection `databricks_id` (see project README).
+"""
+
 from datetime import datetime,timedelta
 from airflow import DAG
 from airflow.operators.bash import BashOperator
